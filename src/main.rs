@@ -2,6 +2,7 @@ extern crate dotenv;
 
 use dotenv::dotenv;
 use futures_util::stream::StreamExt;
+use log::{error, info};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::stream_consumer::StreamConsumer;
 use rdkafka::consumer::{CommitMode, Consumer};
@@ -44,13 +45,19 @@ fn generate_headers_map(headers: &str) -> Result<HeaderMap, Box<dyn std::error::
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Hello, world!");
     dotenv().ok();
-    let config = get_env_vars()?;
+    env_logger::builder()
+        .format_timestamp_millis()
+        .format_module_path(false)
+        .filter_level(log::LevelFilter::Info)
+        .init();
 
+    let config = get_env_vars()?;
     let headers: HeaderMap =
         generate_headers_map(&config.http_headers).expect("Failed to parse headers");
 
+    info!("Creating consumer and connecting to Kafka");
+    print!("Hello");
     let consumer: StreamConsumer = ClientConfig::new()
         .set("bootstrap.servers", &config.kafka_brokers)
         .set("group.id", "my_group")
@@ -66,6 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .subscribe(&[&config.kafka_topic])
         .expect("Can't subscribe to specified topics");
 
+    info!("Starting consumer");
     loop {
         match consumer.recv().await {
             Err(e) => eprintln!("Kafka error: {}", e),
@@ -74,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None => "",
                     Some(Ok(s)) => s,
                     Some(Err(e)) => {
-                        eprintln!("Error while deserializing message payload: {:?}", e);
+                        error!("Error while deserializing message payload: {:?}", e);
                         ""
                     }
                 };
@@ -88,16 +96,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .await?;
 
                 if res.status().is_success() {
-                    println!("Successfully sent payload: {}", payload[0..15].to_string());
+                    info!("Successfully sent payload: {}", payload[0..15].to_string());
+                    consumer.commit_message(&m, CommitMode::Async).unwrap();
                 } else {
-                    println!(
+                    error!(
                         "Failed to send payload: {} {:?}",
                         res.status(),
                         res.text().await?
                     );
                 }
-                consumer.commit_message(&m, CommitMode::Async).unwrap();
             }
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+
+    use super::*;
+
+    #[test]
+    fn test_missing_env_vars() {
+        env::remove_var("KAFKA_BROKERS");
+        env::remove_var("KAFKA_TOPIC");
+        env::remove_var("HTTP_TARGET");
+
+        let env_result = get_env_vars();
+        assert!(
+            env_result.is_err(),
+            "Expected error due to missing environment variables"
+        );
+    }
+
+    #[test]
+    fn test_valid_env_vars() {
+        env::set_var("KAFKA_BROKERS", "localhost:9092");
+        env::set_var("KAFKA_TOPIC", "my_topic");
+        env::set_var("SASL_MECHANISM", "PLAIN");
+        env::set_var("SASL_USERNAME", "my_user");
+        env::set_var("SASL_PASSWORD", "my_password");
+        env::set_var("HTTP_TARGET", "http://localhost:3000");
+        env::set_var(
+            "HTTP_HEADERS",
+            "Authorization: Bearer xyz;Another-Header: value",
+        );
+
+        let env_result = get_env_vars();
+        assert!(
+            env_result.is_ok(),
+            "Expected successful environment variable loading"
+        );
+
+        let config = env_result.unwrap();
+        assert_eq!(config.kafka_brokers, "localhost:9092");
+        assert_eq!(config.kafka_topic, "my_topic");
+        assert_eq!(config.http_target, "http://localhost:3000");
+        // ...
     }
 }
