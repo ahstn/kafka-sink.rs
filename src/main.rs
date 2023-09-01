@@ -1,7 +1,8 @@
 extern crate dotenv;
 
 use dotenv::dotenv;
-use futures_util::stream::StreamExt;
+use futures::stream::FuturesUnordered;
+use futures::{StreamExt, TryStreamExt};
 use log::{error, info};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::stream_consumer::StreamConsumer;
@@ -44,7 +45,7 @@ fn generate_headers_map(headers: &str) -> Result<HeaderMap, Box<dyn std::error::
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
     dotenv().ok();
     env_logger::builder()
         .format_timestamp_millis()
@@ -52,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter_level(log::LevelFilter::Info)
         .init();
 
-    let config = get_env_vars()?;
+    let config = get_env_vars().expect("Error loading environment variables");
     let headers: HeaderMap =
         generate_headers_map(&config.http_headers).expect("Failed to parse headers");
 
@@ -73,41 +74,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .subscribe(&[&config.kafka_topic])
         .expect("Can't subscribe to specified topics");
 
-    info!("Starting consumer");
-    loop {
-        match consumer.recv().await {
-            Err(e) => eprintln!("Kafka error: {}", e),
-            Ok(m) => {
-                let payload = match m.payload_view::<str>() {
-                    None => "",
-                    Some(Ok(s)) => s,
-                    Some(Err(e)) => {
-                        error!("Error while deserializing message payload: {:?}", e);
-                        ""
-                    }
-                };
+    let stream_processor = consumer.stream().try_for_each(|message| {
+        let owned_message = message.detach();
+        let owned_headers = headers.clone();
+        let target = config.http_target.to_string();
 
-                let client = reqwest::Client::new();
-                let res = client
-                    .post(&config.http_target)
-                    .json(&serde_json::from_str::<serde_json::Value>(payload)?)
-                    .headers(headers.clone())
-                    .send()
-                    .await?;
-
-                if res.status().is_success() {
-                    info!("Successfully sent payload: {}", payload[0..15].to_string());
-                    consumer.commit_message(&m, CommitMode::Async).unwrap();
-                } else {
-                    error!(
-                        "Failed to send payload: {} {:?}",
-                        res.status(),
-                        res.text().await?
-                    );
+        async move {
+            let payload = match owned_message.payload_view::<str>() {
+                None => "",
+                Some(Ok(s)) => s,
+                Some(Err(e)) => {
+                    error!("Error while deserializing message payload: {:?}", e);
+                    ""
                 }
+            };
+
+            let client = reqwest::Client::new();
+            let res = client
+                .post(&target)
+                .json(
+                    &serde_json::from_str::<serde_json::Value>(payload)
+                        .expect("error decoding body"),
+                )
+                .headers(owned_headers)
+                .send()
+                .await
+                .expect("error sending request");
+
+            if res.status().is_success() {
+                info!("Successfully sent payload: {}", payload[0..15].to_string());
+            } else {
+                error!(
+                    "Failed to send payload: {} {:?}",
+                    res.status(),
+                    res.text().await.expect("error decoding body")
+                );
             }
-        };
-    }
+            Ok(())
+        }
+    });
+
+    info!("Starting consumer");
+    stream_processor.await.expect("stream processing failed");
 }
 
 #[cfg(test)]

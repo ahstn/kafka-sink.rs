@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-rdkafka = { version = "0.26", features = ["cmake-build", "ssl", "sasl"] }
+rdkafka = { version = "0.34", features = ["cmake-build", "ssl", "sasl"] }
 futures-util = "0.3"
 reqwest = { version = "0.11", features = ["json"] }
 dotenv = "0.15"
@@ -16,3 +16,5 @@ envy = "0.4.2"
 serde = { version = "1.0.188", features = ["derive", "serde_derive"] }
 log = "0.4.20"
 env_logger = "0.10.0"
+async-std = "1.12.0"
+futures = "0.3.28"
