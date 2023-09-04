@@ -11,6 +11,11 @@ use rdkafka::message::Message;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
 use std::str::FromStr;
+use std::time::Duration;
+use tokio::time::timeout;
+use rdkafka::TopicPartitionList;
+use rdkafka::Offset;
+
 
 #[derive(Deserialize, Debug)]
 struct Config {
@@ -44,6 +49,29 @@ fn generate_headers_map(headers: &str) -> Result<HeaderMap, Box<dyn std::error::
     Ok(headers_map)
 }
 
+async fn process_and_commit_batch(
+    consumer: &StreamConsumer,
+    batch: &mut Vec<rdkafka::message::OwnedMessage>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Replace this with your actual batch processing and sending logic
+    println!("Processing batch of size {}", batch.len());
+
+    // Create a TopicPartitionList to hold the offsets to commit
+    let mut tpl = TopicPartitionList::new();
+    for msg in batch.iter() {
+        let topic = msg.topic();
+        let partition = msg.partition();
+        let next_offset = Offset::from_raw(msg.offset() + 1);
+        tpl.add_partition_offset(topic, partition, next_offset)?;
+    }
+
+    consumer.commit(&tpl, CommitMode::Async)?;
+
+    batch.clear(); // Clear the batch
+    Ok(())
+}
+
+
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -74,48 +102,42 @@ async fn main() {
         .subscribe(&[&config.kafka_topic])
         .expect("Can't subscribe to specified topics");
 
-    let stream_processor = consumer.stream().try_for_each(|message| {
-        let owned_message = message.detach();
-        let owned_headers = headers.clone();
-        let target = config.http_target.to_string();
+    let max_batch_size = 10;
+    let batch_timeout = Duration::from_secs(5);
 
-        async move {
-            let payload = match owned_message.payload_view::<str>() {
-                None => "",
-                Some(Ok(s)) => s,
-                Some(Err(e)) => {
-                    error!("Error while deserializing message payload: {:?}", e);
-                    ""
+    loop {
+        // Reinitialize the variables within the loop to solve the 'moved value' problem.
+        let batch = Vec::new();
+        let message_stream = consumer.stream();
+
+        // Using `async move` to take ownership of `message` and avoid lifetime issues.
+        let try_for_each_result = message_stream.try_for_each(|message| {
+            let mut batch = batch.clone();  // Clone the batch to keep the outer one untouched
+            let consumer = &consumer; // Borrow the consumer to avoid moving it
+            async move {
+                batch.push(message.detach());
+
+                if batch.len() >= max_batch_size {
+                    process_and_commit_batch(consumer, &mut batch).await.expect("batch error");
+                    batch.clear();
                 }
-            };
 
-            let client = reqwest::Client::new();
-            let res = client
-                .post(&target)
-                .json(
-                    &serde_json::from_str::<serde_json::Value>(payload)
-                        .expect("error decoding body"),
-                )
-                .headers(owned_headers)
-                .send()
-                .await
-                .expect("error sending request");
-
-            if res.status().is_success() {
-                info!("Successfully sent payload: {}", payload[0..15].to_string());
-            } else {
-                error!(
-                    "Failed to send payload: {} {:?}",
-                    res.status(),
-                    res.text().await.expect("error decoding body")
-                );
+                if let Err(_) = tokio::time::timeout(batch_timeout, tokio::task::yield_now()).await {
+                    if !batch.is_empty() {
+                        process_and_commit_batch(consumer, &mut batch).await.expect("batch error");
+                        batch.clear();
+                    }
+                }
+                
+                Ok(())
             }
-            Ok(())
-        }
-    });
+        }).await;
 
-    info!("Starting consumer");
-    stream_processor.await.expect("stream processing failed");
+        match try_for_each_result {
+            Ok(_) => {} // proceed
+            Err(err) => eprintln!("Stream processing failed: {}", err),
+        }
+    }
 }
 
 #[cfg(test)]
