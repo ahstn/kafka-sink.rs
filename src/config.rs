@@ -1,7 +1,12 @@
-use serde::Deserialize;
 extern crate dotenv;
 
-#[derive(Deserialize, Debug)]
+
+use serde::Deserialize;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use std::error::Error;
+use std::str::FromStr;
+
+#[derive(Clone, Deserialize, Debug)]
 pub struct Config {
     pub kafka_brokers: String,
     pub kafka_topic: String,
@@ -16,6 +21,22 @@ pub fn fetch() -> Result<Config, Box<dyn std::error::Error>> {
     match envy::from_env::<Config>() {
         Ok(config) => Ok(config),
         Err(err) => Err(Box::new(err)),
+    }
+}
+
+impl Config {
+    pub fn fetch_headers(self) -> Result<HeaderMap, Box<dyn std::error::Error>> {
+        let mut headers_map: HeaderMap = HeaderMap::new();
+        self.http_headers.split(";").for_each(|header| {
+            let parts: Vec<&str> = header.split(": ").collect();
+            if parts.len() == 2 {
+                headers_map.insert(
+                    HeaderName::from_str(&parts[0]).unwrap(),
+                    HeaderValue::from_str(&parts[1]).unwrap(),
+                );
+            }
+        });
+        Ok(headers_map)
     }
 }
 
