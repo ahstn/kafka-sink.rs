@@ -7,7 +7,7 @@ use rdkafka::config::ClientConfig;
 use rdkafka::consumer::stream_consumer::StreamConsumer;
 use rdkafka::consumer::Consumer;
 use rdkafka::error::KafkaError;
-use rdkafka::message::{Message, BorrowedMessage};
+use rdkafka::message::{Message, BorrowedMessage, self};
 use std::error::Error;
 
 mod config;
@@ -58,7 +58,6 @@ async fn main() {
     
     loop {
         let config = config.clone();
-        let headers = headers.clone();
 
         // Change this to `chunk` and `for_each` on all chunks?
         let c: Vec<String> = consumer
@@ -82,7 +81,7 @@ async fn main() {
         let res = client
             .post(&config.http_target.clone())
             .json(&c)
-            .headers(headers)
+            .headers(headers.clone())
             .send()
             .await
             .expect("error sending request");
@@ -90,17 +89,21 @@ async fn main() {
         if c.len() <= 100 {
             info!("Less than $BATCH_SIZE messages remaining, processing in real-time");
             while let Some(message_result) = consumer.stream().next().await {
-                match message_result {
-                    Ok(borrowed_msg) => {
-                        let payload = borrowed_msg.payload().unwrap();
-                        let payload_str = String::from_utf8(payload.to_vec()).unwrap_or_else(|_| "Invalid UTF-8".to_string());
-    
-                        // Process the individual message
-                        println!("Received: {}", payload_str);
-                    }
-                    Err(err) => {
-                        println!("Error: {}", err);
-                    }
+                match decode_kafka_message(message_result) {
+                    Ok(message) => {
+                        log::info!("Received message: {}", message);
+                        let client = reqwest::Client::new();
+                        let res = client
+                            .post(&config.http_target.clone())
+                            .json(&[message])
+                            .headers(headers.clone())
+                            .send()
+                            .await
+                            .expect("error sending request");
+                    },
+                    Err(e) => {
+                        warn!("Error while processing message: {}", e);
+                    }   
                 }
             }
         }
