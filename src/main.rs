@@ -9,10 +9,9 @@ use rdkafka::consumer::stream_consumer::StreamConsumer;
 use rdkafka::consumer::Consumer;
 use rdkafka::error::KafkaError;
 use rdkafka::message::{Message, BorrowedMessage};
-use rdkafka::util::Timeout;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use std::error::Error;
 use std::str::FromStr;
-use std::time::Duration;
 
 mod config;
 
@@ -30,6 +29,25 @@ fn generate_headers_map(headers: &str) -> Result<HeaderMap, Box<dyn std::error::
     Ok(headers_map)
 }
 
+fn decode_kafka_message(msg_result: Result<BorrowedMessage, KafkaError>) -> Result<String, Box<dyn Error>> {
+    match msg_result {
+        Ok(borrowed_msg) => {
+            let payload = match borrowed_msg.payload_view::<str>() {
+                None => "",
+                Some(Ok(s)) => s,
+                Some(Err(e)) => {
+                    error!("Error while deserializing message payload: {:?}", e);
+                    return Err(e.into());
+                }
+            };
+            Ok(payload.to_string())
+        },
+        Err(err) => {
+            return Err(err.into());
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -44,7 +62,6 @@ async fn main() {
         generate_headers_map(&config.http_headers).expect("Failed to parse headers");
 
     info!("Creating consumer and connecting to Kafka");
-    print!("Hello");
     let consumer: StreamConsumer = ClientConfig::new()
         .set("bootstrap.servers", &config.kafka_brokers)
         .set("group.id", "my_group")
@@ -59,27 +76,19 @@ async fn main() {
     let c: Vec<String> = consumer
         .stream()
         .take(100) // Take only 100 messages
-        .map(|msg_result| {
-            match msg_result {
-                Ok(borrowed_msg) => {
-                    let payload = match borrowed_msg.payload_view::<str>() {
-                        None => "",
-                        Some(Ok(s)) => s,
-                        Some(Err(e)) => {
-                            error!("Error while deserializing message payload: {:?}", e);
-                            ""
-                        }
-                    };
-                    payload.to_string()
-                }
-                Err(err) => {
-                    // Handle Kafka error here, possibly returning a special String marker
-                    format!("Error: {}", err)
-                }
+        .map(decode_kafka_message)
+        .filter_map(|result| async {
+            match result {
+                Ok(message) => Some(message),
+                Err(e) => {
+                    warn!("Error while processing message: {}", e);
+                    None   
+                }, 
             }
         })
         .collect::<Vec<_>>()
         .await;
+
     log::info!("Received messages {:?} length: {}", c, c.len());
     let client = reqwest::Client::new();
     let res = client
