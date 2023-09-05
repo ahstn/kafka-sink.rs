@@ -1,34 +1,20 @@
 extern crate dotenv;
 
 use dotenv::dotenv;
-use futures::stream::FuturesUnordered;
-use futures::{StreamExt, TryStreamExt};
-use log::{error, info};
+use futures::stream::{self, StreamExt};
+use futures::TryStreamExt;
+use log::{error, info, warn};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::stream_consumer::StreamConsumer;
-use rdkafka::consumer::{CommitMode, Consumer};
-use rdkafka::message::Message;
+use rdkafka::consumer::Consumer;
+use rdkafka::error::KafkaError;
+use rdkafka::message::{Message, BorrowedMessage};
+use rdkafka::util::Timeout;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use serde::Deserialize;
 use std::str::FromStr;
+use std::time::Duration;
 
-#[derive(Deserialize, Debug)]
-struct Config {
-    kafka_brokers: String,
-    kafka_topic: String,
-    http_target: String,
-    http_headers: String,
-    sasl_mechanism: String,
-    sasl_username: String,
-    sasl_password: String,
-}
-
-fn get_env_vars() -> Result<Config, Box<dyn std::error::Error>> {
-    match envy::from_env::<Config>() {
-        Ok(config) => Ok(config),
-        Err(err) => Err(Box::new(err)),
-    }
-}
+mod config;
 
 fn generate_headers_map(headers: &str) -> Result<HeaderMap, Box<dyn std::error::Error>> {
     let mut headers_map: HeaderMap = HeaderMap::new();
@@ -53,7 +39,7 @@ async fn main() {
         .filter_level(log::LevelFilter::Info)
         .init();
 
-    let config = get_env_vars().expect("Error loading environment variables");
+    let config = config::fetch().expect("Error loading environment variables");
     let headers: HeaderMap =
         generate_headers_map(&config.http_headers).expect("Failed to parse headers");
 
@@ -63,10 +49,6 @@ async fn main() {
         .set("bootstrap.servers", &config.kafka_brokers)
         .set("group.id", "my_group")
         .set("auto.offset.reset", "smallest")
-        .set("security.protocol", "SASL_SSL")
-        .set("sasl.mechanism", &config.sasl_mechanism)
-        .set("sasl.username", &config.sasl_username)
-        .set("sasl.password", &config.sasl_password)
         .create()
         .expect("Consumer creation failed");
 
@@ -74,92 +56,38 @@ async fn main() {
         .subscribe(&[&config.kafka_topic])
         .expect("Can't subscribe to specified topics");
 
-    let stream_processor = consumer.stream().try_for_each(|message| {
-        let owned_message = message.detach();
-        let owned_headers = headers.clone();
-        let target = config.http_target.to_string();
-
-        async move {
-            let payload = match owned_message.payload_view::<str>() {
-                None => "",
-                Some(Ok(s)) => s,
-                Some(Err(e)) => {
-                    error!("Error while deserializing message payload: {:?}", e);
-                    ""
+    let c: Vec<String> = consumer
+        .stream()
+        .take(100) // Take only 100 messages
+        .map(|msg_result| {
+            match msg_result {
+                Ok(borrowed_msg) => {
+                    let payload = match borrowed_msg.payload_view::<str>() {
+                        None => "",
+                        Some(Ok(s)) => s,
+                        Some(Err(e)) => {
+                            error!("Error while deserializing message payload: {:?}", e);
+                            ""
+                        }
+                    };
+                    payload.to_string()
                 }
-            };
-
-            let client = reqwest::Client::new();
-            let res = client
-                .post(&target)
-                .json(
-                    &serde_json::from_str::<serde_json::Value>(payload)
-                        .expect("error decoding body"),
-                )
-                .headers(owned_headers)
-                .send()
-                .await
-                .expect("error sending request");
-
-            if res.status().is_success() {
-                info!("Successfully sent payload: {}", payload[0..15].to_string());
-            } else {
-                error!(
-                    "Failed to send payload: {} {:?}",
-                    res.status(),
-                    res.text().await.expect("error decoding body")
-                );
+                Err(err) => {
+                    // Handle Kafka error here, possibly returning a special String marker
+                    format!("Error: {}", err)
+                }
             }
-            Ok(())
-        }
-    });
+        })
+        .collect::<Vec<_>>()
+        .await;
+    log::info!("Received messages {:?} length: {}", c, c.len());
+    let client = reqwest::Client::new();
+    let res = client
+        .post(&config.http_target)
+        .json(&c)
+        .headers(headers)
+        .send()
+        .await
+        .expect("error sending request");
 
-    info!("Starting consumer");
-    stream_processor.await.expect("stream processing failed");
-}
-
-#[cfg(test)]
-mod tests {
-    use std::env;
-
-    use super::*;
-
-    #[test]
-    fn test_missing_env_vars() {
-        env::remove_var("KAFKA_BROKERS");
-        env::remove_var("KAFKA_TOPIC");
-        env::remove_var("HTTP_TARGET");
-
-        let env_result = get_env_vars();
-        assert!(
-            env_result.is_err(),
-            "Expected error due to missing environment variables"
-        );
-    }
-
-    #[test]
-    fn test_valid_env_vars() {
-        env::set_var("KAFKA_BROKERS", "localhost:9092");
-        env::set_var("KAFKA_TOPIC", "my_topic");
-        env::set_var("SASL_MECHANISM", "PLAIN");
-        env::set_var("SASL_USERNAME", "my_user");
-        env::set_var("SASL_PASSWORD", "my_password");
-        env::set_var("HTTP_TARGET", "http://localhost:3000");
-        env::set_var(
-            "HTTP_HEADERS",
-            "Authorization: Bearer xyz;Another-Header: value",
-        );
-
-        let env_result = get_env_vars();
-        assert!(
-            env_result.is_ok(),
-            "Expected successful environment variable loading"
-        );
-
-        let config = env_result.unwrap();
-        assert_eq!(config.kafka_brokers, "localhost:9092");
-        assert_eq!(config.kafka_topic, "my_topic");
-        assert_eq!(config.http_target, "http://localhost:3000");
-        // ...
-    }
 }
