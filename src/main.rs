@@ -8,7 +8,10 @@ use rdkafka::consumer::stream_consumer::StreamConsumer;
 use rdkafka::consumer::Consumer;
 use rdkafka::error::KafkaError;
 use rdkafka::message::{Message, BorrowedMessage, self};
+use rdkafka::metadata::{self, MetadataPartition};
 use std::error::Error;
+use std::option::Iter;
+use std::time::Duration;
 
 mod config;
 
@@ -51,14 +54,37 @@ async fn main() {
         .create()
         .expect("Consumer creation failed");
 
+    let metadata = consumer
+        .fetch_metadata(Some("users"), Duration::from_secs(5))
+        .expect("Failed to fetch metadata"); 
+
+    let length = metadata.topics()
+        .iter()
+        .find(|t| t.name() == "users")
+        .and_then(|t| {
+            let sum: i64 = t.partitions()
+                .iter()
+                .map(|p| {
+                    let (low, high) = consumer.fetch_watermarks("users", p.id(), Duration::from_secs(1))
+                        .unwrap_or((-1, -1));
+                    high - low
+                })
+                .sum();
+            Some(sum)
+        })
+        .unwrap_or(0);
+
+    log::info!("Length: {}", length);
+
     consumer
         .subscribe(&[&config.kafka_topic])
         .expect("Can't subscribe to specified topics");
     
-    
     loop {
-        let config = config.clone();
-
+        // Pass config and headers as references
+        let config_ref = &config;
+        let headers_ref = &headers;
+    
         // Change this to `chunk` and `for_each` on all chunks?
         let c: Vec<String> = consumer
             .stream()
@@ -79,9 +105,9 @@ async fn main() {
         log::info!("Received {} messages", c.len());
         let client = reqwest::Client::new();
         let res = client
-            .post(&config.http_target.clone())
+            .post(&config_ref.http_target.clone())
             .json(&c)
-            .headers(headers.clone())
+            .headers(headers_ref.clone())
             .send()
             .await
             .expect("error sending request");
@@ -94,9 +120,9 @@ async fn main() {
                         log::info!("Received message: {}", message);
                         let client = reqwest::Client::new();
                         let res = client
-                            .post(&config.http_target.clone())
+                            .post(&config_ref.http_target.clone())
                             .json(&[message])
-                            .headers(headers.clone())
+                            .headers(headers_ref.clone())
                             .send()
                             .await
                             .expect("error sending request");
@@ -111,3 +137,4 @@ async fn main() {
 
 
 }
+
