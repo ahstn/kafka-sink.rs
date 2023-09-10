@@ -1,41 +1,16 @@
 extern crate dotenv;
 
 use dotenv::dotenv;
-use futures::future;
-use futures::stream::{self, StreamExt};
-use futures_util::future::poll_fn;
-use log::{error, info, warn};
-use rdkafka::config::ClientConfig;
+use futures::stream::StreamExt;
+use log::{info, warn};
 use rdkafka::consumer::stream_consumer::StreamConsumer;
 use rdkafka::consumer::Consumer;
-use rdkafka::error::KafkaError;
-use rdkafka::message::{Message, BorrowedMessage, self};
-use rdkafka::metadata::{self, MetadataPartition};
+use rdkafka::message::Message;
 use std::error::Error;
-use std::option::Iter;
-use std::task::Poll;
 use std::time::Duration;
 
 mod config;
-
-fn decode_kafka_message(msg_result: Result<BorrowedMessage, KafkaError>) -> Result<String, Box<dyn Error>> {
-    match msg_result {
-        Ok(borrowed_msg) => {
-            let payload = match borrowed_msg.payload_view::<str>() {
-                None => "",
-                Some(Ok(s)) => s,
-                Some(Err(e)) => {
-                    error!("Error while deserializing message payload: {:?}", e);
-                    return Err(e.into());
-                }
-            };
-            Ok(payload.to_string())
-        },
-        Err(err) => {
-            return Err(err.into());
-        }
-    }
-}
+mod kafka;
 
 #[tokio::main]
 async fn main() {
@@ -50,13 +25,12 @@ async fn main() {
     let headers = config.clone().fetch_headers().expect("Error parsing headers");
 
     info!("Creating consumer and connecting to Kafka");
-    let consumer: StreamConsumer = ClientConfig::new()
-        .set("bootstrap.servers", &config.kafka_brokers)
-        .set("group.id", "my_group")
-        .set("auto.offset.reset", "smallest")
+    let consumer: StreamConsumer = config.kafka_config()
         .create()
         .expect("Consumer creation failed");
 
+    // TODO: single function to fetch topic length and current offset
+    // with short lived consumer
     let metadata = consumer
         .fetch_metadata(Some("users"), Duration::from_secs(5))
         .expect("Failed to fetch metadata"); 
@@ -64,20 +38,9 @@ async fn main() {
     let length = metadata.topics()
         .iter()
         .find(|t| t.name() == "users")
-        .and_then(|t| {
-            let sum: i64 = t.partitions()
-                .iter()
-                .map(|p| {
-                    let (low, high) = consumer.fetch_watermarks("users", p.id(), Duration::from_secs(1))
-                        .unwrap_or((-1, -1));
-                    high - low
-                })
-                .sum();
-            Some(sum)
-        })
+        .map(|t| kafka::fetch_topic_length(&consumer, &t))
         .unwrap_or(0);
-
-    log::info!("Length: {}", length);
+    log::info!("Topic Length: {}", length);
 
     consumer
         .subscribe(&[&config.kafka_topic])
@@ -101,7 +64,7 @@ async fn main() {
                 }
             ))
             .take(batch_size)
-            .map(decode_kafka_message)
+            .map(kafka::decode_kafka_message)
             .filter_map(|result| async {
                 match result {
                     Ok(message) => Some(message),
@@ -116,22 +79,23 @@ async fn main() {
 
         log::info!("Received {} messages", c.len());
         let client = reqwest::Client::new();
-        let res = client
+        let _res = client
             .post(&config_ref.http_target.clone())
             .json(&c)
             .headers(headers_ref.clone())
             .send()
             .await
             .expect("error sending request");
+        // TODO: Re-add commit after testing
     
         if c.len() < batch_size {
             info!("Less than $BATCH_SIZE messages remaining, processing in real-time");
             while let Some(message_result) = consumer.stream().next().await {
-                match decode_kafka_message(message_result) {
+                match kafka::decode_kafka_message(message_result) {
                     Ok(message) => {
                         log::info!("Received message: {}", message);
                         let client = reqwest::Client::new();
-                        let res = client
+                        let _res = client
                             .post(&config_ref.http_target.clone())
                             .json(&[message])
                             .headers(headers_ref.clone())
@@ -146,5 +110,4 @@ async fn main() {
             }
         }
     }
-
 }

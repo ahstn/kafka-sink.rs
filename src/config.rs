@@ -1,15 +1,14 @@
 extern crate dotenv;
 
-
 use serde::Deserialize;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use std::error::Error;
 use std::str::FromStr;
 
 #[derive(Clone, Deserialize, Debug)]
 pub struct Config {
     pub kafka_brokers: String,
     pub kafka_topic: String,
+    pub kafka_consumer_group: String,
     pub http_target: String,
     pub http_headers: String,
     pub sasl_mechanism: String,
@@ -37,6 +36,22 @@ impl Config {
             }
         });
         Ok(headers_map)
+    }
+
+    pub fn kafka_config(&self) -> rdkafka::config::ClientConfig {
+        let mut kafka_config = rdkafka::config::ClientConfig::new();
+
+        kafka_config.set("bootstrap.servers", &self.kafka_brokers);
+        kafka_config.set("group.id", &self.kafka_consumer_group);
+        kafka_config.set("auto.offset.reset", "earliest");
+        kafka_config.set("enable.auto.commit", "false");
+        if self.sasl_mechanism != "PLAIN" {
+            kafka_config.set("security.protocol", "SASL_SSL");
+            kafka_config.set("sasl.mechanisms", &self.sasl_mechanism);
+            kafka_config.set("sasl.username", &self.sasl_username);
+            kafka_config.set("sasl.password", &self.sasl_password);
+        }
+        kafka_config
     }
 }
 
