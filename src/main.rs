@@ -1,7 +1,9 @@
 extern crate dotenv;
 
 use dotenv::dotenv;
+use futures::future;
 use futures::stream::{self, StreamExt};
+use futures_util::future::poll_fn;
 use log::{error, info, warn};
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::stream_consumer::StreamConsumer;
@@ -11,6 +13,7 @@ use rdkafka::message::{Message, BorrowedMessage, self};
 use rdkafka::metadata::{self, MetadataPartition};
 use std::error::Error;
 use std::option::Iter;
+use std::task::Poll;
 use std::time::Duration;
 
 mod config;
@@ -79,16 +82,25 @@ async fn main() {
     consumer
         .subscribe(&[&config.kafka_topic])
         .expect("Can't subscribe to specified topics");
+
+    let m = consumer.recv().await;
+    log::info!("Received message offset: {}", m.unwrap().offset());
     
     loop {
+        let batch_size: usize = 100;
         // Pass config and headers as references
         let config_ref = &config;
         let headers_ref = &headers;
     
-        // Change this to `chunk` and `for_each` on all chunks?
         let c: Vec<String> = consumer
             .stream()
-            .take(100) // Take only 100 messages
+            .take_while(|m| futures::future::ready(
+                match m {
+                    Ok(m) => m.offset() + (batch_size as i64) <= length,
+                    Err(_) => false
+                }
+            ))
+            .take(batch_size)
             .map(decode_kafka_message)
             .filter_map(|result| async {
                 match result {
@@ -101,7 +113,7 @@ async fn main() {
             })
             .collect::<Vec<_>>()
             .await;
-    
+
         log::info!("Received {} messages", c.len());
         let client = reqwest::Client::new();
         let res = client
@@ -112,7 +124,7 @@ async fn main() {
             .await
             .expect("error sending request");
     
-        if c.len() <= 100 {
+        if c.len() < batch_size {
             info!("Less than $BATCH_SIZE messages remaining, processing in real-time");
             while let Some(message_result) = consumer.stream().next().await {
                 match decode_kafka_message(message_result) {
@@ -135,6 +147,4 @@ async fn main() {
         }
     }
 
-
 }
-

@@ -45,7 +45,7 @@ services:
     volumes:
       - ./redpanda-datagen.json:/schemas/schema.json
     entrypoint:
-      datagen -s /schemas/schema.json -f json -n 500 -d
+      datagen -s /schemas/schema.json -f json -n 850 -d
 
   console:
     container_name: redpanda-console
