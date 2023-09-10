@@ -24,6 +24,15 @@ services:
       - 19644:9644
     healthcheck: {test: curl -f localhost:9644/v1/status/ready, interval: 1s, start_period: 30s}
 
+  http-echo:
+    image: mendhak/http-https-echo:29
+    environment:
+      HTTP_PORT: 3000
+      HTTPS_PORT: 3443
+    ports:
+      - 3000:3000
+      - 3443:3443
+
   # https://github.com/MaterializeInc/datagen
   datagen:
     container_name: datagen
@@ -36,7 +45,7 @@ services:
     volumes:
       - ./redpanda-datagen.json:/schemas/schema.json
     entrypoint:
-      datagen -s /schemas/schema.json -f json -n 500 -d
+      datagen -s /schemas/schema.json -f json -n 850 -d
 
   console:
     container_name: redpanda-console

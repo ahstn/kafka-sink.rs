@@ -1,48 +1,16 @@
 extern crate dotenv;
 
 use dotenv::dotenv;
-use futures::stream::FuturesUnordered;
-use futures::{StreamExt, TryStreamExt};
-use log::{error, info};
-use rdkafka::config::ClientConfig;
+use futures::stream::StreamExt;
+use log::{info, warn};
 use rdkafka::consumer::stream_consumer::StreamConsumer;
-use rdkafka::consumer::{CommitMode, Consumer};
+use rdkafka::consumer::Consumer;
 use rdkafka::message::Message;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use serde::Deserialize;
-use std::str::FromStr;
+use std::error::Error;
+use std::time::Duration;
 
-#[derive(Deserialize, Debug)]
-struct Config {
-    kafka_brokers: String,
-    kafka_topic: String,
-    http_target: String,
-    http_headers: String,
-    sasl_mechanism: String,
-    sasl_username: String,
-    sasl_password: String,
-}
-
-fn get_env_vars() -> Result<Config, Box<dyn std::error::Error>> {
-    match envy::from_env::<Config>() {
-        Ok(config) => Ok(config),
-        Err(err) => Err(Box::new(err)),
-    }
-}
-
-fn generate_headers_map(headers: &str) -> Result<HeaderMap, Box<dyn std::error::Error>> {
-    let mut headers_map: HeaderMap = HeaderMap::new();
-    headers.split(";").for_each(|header| {
-        let parts: Vec<&str> = header.split(": ").collect();
-        if parts.len() == 2 {
-            headers_map.insert(
-                HeaderName::from_str(&parts[0]).unwrap(),
-                HeaderValue::from_str(&parts[1]).unwrap(),
-            );
-        }
-    });
-    Ok(headers_map)
-}
+mod config;
+mod kafka;
 
 #[tokio::main]
 async fn main() {
@@ -53,113 +21,93 @@ async fn main() {
         .filter_level(log::LevelFilter::Info)
         .init();
 
-    let config = get_env_vars().expect("Error loading environment variables");
-    let headers: HeaderMap =
-        generate_headers_map(&config.http_headers).expect("Failed to parse headers");
+    let config = config::fetch().expect("Error loading environment variables");
+    let headers = config.clone().fetch_headers().expect("Error parsing headers");
 
     info!("Creating consumer and connecting to Kafka");
-    print!("Hello");
-    let consumer: StreamConsumer = ClientConfig::new()
-        .set("bootstrap.servers", &config.kafka_brokers)
-        .set("group.id", "my_group")
-        .set("auto.offset.reset", "smallest")
-        .set("security.protocol", "SASL_SSL")
-        .set("sasl.mechanism", &config.sasl_mechanism)
-        .set("sasl.username", &config.sasl_username)
-        .set("sasl.password", &config.sasl_password)
+    let consumer: StreamConsumer = config.kafka_config()
         .create()
         .expect("Consumer creation failed");
+
+    // TODO: single function to fetch topic length and current offset
+    // with short lived consumer
+    let metadata = consumer
+        .fetch_metadata(Some("users"), Duration::from_secs(5))
+        .expect("Failed to fetch metadata"); 
+
+    let length = metadata.topics()
+        .iter()
+        .find(|t| t.name() == "users")
+        .map(|t| kafka::fetch_topic_length(&consumer, &t))
+        .unwrap_or(0);
+    log::info!("Topic Length: {}", length);
 
     consumer
         .subscribe(&[&config.kafka_topic])
         .expect("Can't subscribe to specified topics");
 
-    let stream_processor = consumer.stream().try_for_each(|message| {
-        let owned_message = message.detach();
-        let owned_headers = headers.clone();
-        let target = config.http_target.to_string();
-
-        async move {
-            let payload = match owned_message.payload_view::<str>() {
-                None => "",
-                Some(Ok(s)) => s,
-                Some(Err(e)) => {
-                    error!("Error while deserializing message payload: {:?}", e);
-                    ""
+    let m = consumer.recv().await;
+    log::info!("Received message offset: {}", m.unwrap().offset());
+    
+    loop {
+        let batch_size: usize = 100;
+        // Pass config and headers as references
+        let config_ref = &config;
+        let headers_ref = &headers;
+    
+        let c: Vec<String> = consumer
+            .stream()
+            .take_while(|m| futures::future::ready(
+                match m {
+                    Ok(m) => m.offset() + (batch_size as i64) <= length,
+                    Err(_) => false
                 }
-            };
+            ))
+            .take(batch_size)
+            .map(kafka::decode_kafka_message)
+            .filter_map(|result| async {
+                match result {
+                    Ok(message) => Some(message),
+                    Err(e) => {
+                        warn!("Error while processing message: {}", e);
+                        None   
+                    }, 
+                }
+            })
+            .collect::<Vec<_>>()
+            .await;
 
-            let client = reqwest::Client::new();
-            let res = client
-                .post(&target)
-                .json(
-                    &serde_json::from_str::<serde_json::Value>(payload)
-                        .expect("error decoding body"),
-                )
-                .headers(owned_headers)
-                .send()
-                .await
-                .expect("error sending request");
-
-            if res.status().is_success() {
-                info!("Successfully sent payload: {}", payload[0..15].to_string());
-            } else {
-                error!(
-                    "Failed to send payload: {} {:?}",
-                    res.status(),
-                    res.text().await.expect("error decoding body")
-                );
+        log::info!("Received {} messages", c.len());
+        let client = reqwest::Client::new();
+        let _res = client
+            .post(&config_ref.http_target.clone())
+            .json(&c)
+            .headers(headers_ref.clone())
+            .send()
+            .await
+            .expect("error sending request");
+        // TODO: Re-add commit after testing
+    
+        if c.len() < batch_size {
+            info!("Less than $BATCH_SIZE messages remaining, processing in real-time");
+            while let Some(message_result) = consumer.stream().next().await {
+                match kafka::decode_kafka_message(message_result) {
+                    Ok(message) => {
+                        log::info!("Received message: {}", message);
+                        let client = reqwest::Client::new();
+                        let _res = client
+                            .post(&config_ref.http_target.clone())
+                            .json(&[message])
+                            .headers(headers_ref.clone())
+                            .send()
+                            .await
+                            .expect("error sending request");
+                    },
+                    Err(e) => {
+                        warn!("Error while processing message: {}", e);
+                    }   
+                }
             }
-            Ok(())
         }
-    });
-
-    info!("Starting consumer");
-    stream_processor.await.expect("stream processing failed");
-}
-
-#[cfg(test)]
-mod tests {
-    use std::env;
-
-    use super::*;
-
-    #[test]
-    fn test_missing_env_vars() {
-        env::remove_var("KAFKA_BROKERS");
-        env::remove_var("KAFKA_TOPIC");
-        env::remove_var("HTTP_TARGET");
-
-        let env_result = get_env_vars();
-        assert!(
-            env_result.is_err(),
-            "Expected error due to missing environment variables"
-        );
-    }
-
-    #[test]
-    fn test_valid_env_vars() {
-        env::set_var("KAFKA_BROKERS", "localhost:9092");
-        env::set_var("KAFKA_TOPIC", "my_topic");
-        env::set_var("SASL_MECHANISM", "PLAIN");
-        env::set_var("SASL_USERNAME", "my_user");
-        env::set_var("SASL_PASSWORD", "my_password");
-        env::set_var("HTTP_TARGET", "http://localhost:3000");
-        env::set_var(
-            "HTTP_HEADERS",
-            "Authorization: Bearer xyz;Another-Header: value",
-        );
-
-        let env_result = get_env_vars();
-        assert!(
-            env_result.is_ok(),
-            "Expected successful environment variable loading"
-        );
-
-        let config = env_result.unwrap();
-        assert_eq!(config.kafka_brokers, "localhost:9092");
-        assert_eq!(config.kafka_topic, "my_topic");
-        assert_eq!(config.http_target, "http://localhost:3000");
-        // ...
     }
 }
