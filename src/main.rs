@@ -11,6 +11,7 @@ use std::time::Duration;
 
 mod config;
 mod kafka;
+mod sink;
 
 #[tokio::main]
 async fn main() {
@@ -48,13 +49,15 @@ async fn main() {
 
     let m = consumer.recv().await;
     log::info!("Received message offset: {}", m.unwrap().offset());
+
+    let sink_config = sink::http::HttpConfig {
+        http_target: config.http_target.clone(),
+        http_headers: config.http_headers.clone(),
+    };
+    let sink = sink::http::new_instance(sink_config).expect("Error creating sink");
     
     loop {
         let batch_size: usize = 100;
-        // Pass config and headers as references
-        let config_ref = &config;
-        let headers_ref = &headers;
-    
         let c: Vec<String> = consumer
             .stream()
             .take_while(|m| futures::future::ready(
@@ -78,15 +81,8 @@ async fn main() {
             .await;
 
         log::info!("Received {} messages", c.len());
-        let client = reqwest::Client::new();
-        let _res = client
-            .post(&config_ref.http_target.clone())
-            .json(&c)
-            .headers(headers_ref.clone())
-            .send()
-            .await
-            .expect("error sending request");
-        // TODO: Re-add commit after testing
+        sink.send_batch(&c).await.expect("Error sending batch");
+        // TODO: re-add commit after testing
     
         if c.len() < batch_size {
             info!("Less than $BATCH_SIZE messages remaining, processing in real-time");
@@ -94,14 +90,7 @@ async fn main() {
                 match kafka::decode_kafka_message(message_result) {
                     Ok(message) => {
                         log::info!("Received message: {}", message);
-                        let client = reqwest::Client::new();
-                        let _res = client
-                            .post(&config_ref.http_target.clone())
-                            .json(&[message])
-                            .headers(headers_ref.clone())
-                            .send()
-                            .await
-                            .expect("error sending request");
+                        sink.send(&message).await.expect("Error sending message");
                     },
                     Err(e) => {
                         warn!("Error while processing message: {}", e);

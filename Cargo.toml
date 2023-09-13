@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+async-trait = { version = "0.1.73", features = [] }
 dotenv = "0.15"
 env_logger = "0.10.0"
 envy = "0.4.2"
