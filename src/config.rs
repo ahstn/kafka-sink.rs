@@ -24,20 +24,6 @@ pub fn fetch() -> Result<Config, Box<dyn std::error::Error>> {
 }
 
 impl Config {
-    pub fn fetch_headers(self) -> Result<HeaderMap, Box<dyn std::error::Error>> {
-        let mut headers_map: HeaderMap = HeaderMap::new();
-        self.http_headers.split(";").for_each(|header| {
-            let parts: Vec<&str> = header.split(": ").collect();
-            if parts.len() == 2 {
-                headers_map.insert(
-                    HeaderName::from_str(&parts[0]).unwrap(),
-                    HeaderValue::from_str(&parts[1]).unwrap(),
-                );
-            }
-        });
-        Ok(headers_map)
-    }
-
     pub fn kafka_config(&self) -> rdkafka::config::ClientConfig {
         let mut kafka_config = rdkafka::config::ClientConfig::new();
 
