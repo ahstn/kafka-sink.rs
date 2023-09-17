@@ -11,6 +11,7 @@ use std::time::Duration;
 
 mod config;
 mod kafka;
+mod sink;
 
 #[tokio::main]
 async fn main() {
@@ -22,39 +23,28 @@ async fn main() {
         .init();
 
     let config = config::fetch().expect("Error loading environment variables");
-    let headers = config.clone().fetch_headers().expect("Error parsing headers");
 
     info!("Creating consumer and connecting to Kafka");
     let consumer: StreamConsumer = config.kafka_config()
         .create()
         .expect("Consumer creation failed");
 
-    // TODO: single function to fetch topic length and current offset
-    // with short lived consumer
-    let metadata = consumer
-        .fetch_metadata(Some("users"), Duration::from_secs(5))
-        .expect("Failed to fetch metadata"); 
-
-    let length = metadata.topics()
-        .iter()
-        .find(|t| t.name() == "users")
-        .map(|t| kafka::fetch_topic_length(&consumer, &t))
-        .unwrap_or(0);
-    log::info!("Topic Length: {}", length);
-
+    let length = kafka::topic_length(&consumer).await;
     consumer
         .subscribe(&[&config.kafka_topic])
         .expect("Can't subscribe to specified topics");
 
     let m = consumer.recv().await;
-    log::info!("Received message offset: {}", m.unwrap().offset());
+    log::info!("Topic Length: {}, Message offset: {}", length, m.unwrap().offset());
+
+    let sink_config = sink::http::HttpConfig {
+        http_target: config.http_target.clone(),
+        http_headers: config.http_headers.clone(),
+    };
+    let sink = sink::http::new_instance(sink_config).expect("Error creating sink");
     
     loop {
         let batch_size: usize = 100;
-        // Pass config and headers as references
-        let config_ref = &config;
-        let headers_ref = &headers;
-    
         let c: Vec<String> = consumer
             .stream()
             .take_while(|m| futures::future::ready(
@@ -71,37 +61,25 @@ async fn main() {
                     Err(e) => {
                         warn!("Error while processing message: {}", e);
                         None   
-                    }, 
+                    },
                 }
             })
             .collect::<Vec<_>>()
             .await;
 
         log::info!("Received {} messages", c.len());
-        let client = reqwest::Client::new();
-        let _res = client
-            .post(&config_ref.http_target.clone())
-            .json(&c)
-            .headers(headers_ref.clone())
-            .send()
-            .await
-            .expect("error sending request");
-        // TODO: Re-add commit after testing
+        sink.send_batch(&c).await.expect("Error sending batch");
+        // TODO: re-add commit after testing
     
         if c.len() < batch_size {
-            info!("Less than $BATCH_SIZE messages remaining, processing in real-time");
+            info!("Messages remaining less than $BATCH_SIZE, processing in real-time");
             while let Some(message_result) = consumer.stream().next().await {
                 match kafka::decode_kafka_message(message_result) {
                     Ok(message) => {
                         log::info!("Received message: {}", message);
-                        let client = reqwest::Client::new();
-                        let _res = client
-                            .post(&config_ref.http_target.clone())
-                            .json(&[message])
-                            .headers(headers_ref.clone())
-                            .send()
-                            .await
-                            .expect("error sending request");
+                        sink.send(&message).await.unwrap_or({
+                            warn!("Error sending message to sink");
+                        });
                     },
                     Err(e) => {
                         warn!("Error while processing message: {}", e);
