@@ -33,6 +33,13 @@ services:
       - 3000:3000
       - 3443:3443
 
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DATABASE: postgres
+
   # https://github.com/MaterializeInc/datagen
   datagen:
     container_name: datagen

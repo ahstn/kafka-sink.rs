@@ -44,7 +44,7 @@ async fn main() {
         m.unwrap().offset()
     );
 
-    let sink = determine_sink(config);
+    let sink = determine_sink(config).await;
     loop {
         let batch_size: usize = 100;
         let c: Vec<String> = consumer
@@ -92,7 +92,7 @@ async fn main() {
     }
 }
 
-fn determine_sink(config: Config) -> Box<dyn MessageSink> {
+async fn determine_sink(config: Config) -> Box<dyn MessageSink> {
     match config.sink_type {
         SinkType::HTTP => {
             let sink_config = sink::http::HttpConfig {
@@ -110,7 +110,9 @@ fn determine_sink(config: Config) -> Box<dyn MessageSink> {
                 postgres_db: config.postgres_db.clone(),
                 postgres_table: config.postgres_table.clone(),
             };
-            sink::postgres::new_instance(sink_config).expect("Error creating sink")
+            sink::postgres::new_instance(sink_config)
+                .await
+                .expect("Error creating sink")
         }
     }
 }
