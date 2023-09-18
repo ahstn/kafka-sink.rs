@@ -16,6 +16,15 @@ Currently this runs as a standalone application, reading config from a `dotenv` 
 
 Only HTTP is supported as a destination, but this will expand to at least Postgres, and potentially [Meilisearch | GitHub].
 
+### Wishlist
+
+- [ ] CLI & Clap
+- [ ] Postgres Sink
+- [ ] Pre-flight checks (Postgres table exists, HTTP endpoint is reachable)
+- [ ] Rate limiting
+- [ ] Retry logic with exponential backoff
+- [ ] Meilisearch Sink
+
 ## Development
 
 Using [Materialize - Datagen | Github], we generate test data in a docker compose setup. By default 500 records are sent to a `users` topic when you run `docker-compose up`.
@@ -26,3 +35,4 @@ To check the topics with a UI, open Redpanda Console: `open localhost:8080`
 [materialize - datagen | github]: https://github.com/MaterializeInc/datagen
 [clap | github]: https://github.com/clap-rs/clap
 [meilisearch | github]: https://github.com/meilisearch/MeiliSearch
+    
