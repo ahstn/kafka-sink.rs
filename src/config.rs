@@ -1,19 +1,35 @@
 extern crate dotenv;
 
-use serde::Deserialize;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use serde::Deserialize;
 use std::str::FromStr;
+
+#[derive(Clone, Deserialize, Debug)]
+pub enum SinkType {
+    HTTP,
+    Postgres,
+}
 
 #[derive(Clone, Deserialize, Debug)]
 pub struct Config {
     pub kafka_brokers: String,
     pub kafka_topic: String,
     pub kafka_consumer_group: String,
-    pub http_target: String,
-    pub http_headers: String,
     pub sasl_mechanism: String,
     pub sasl_username: String,
     pub sasl_password: String,
+
+    pub sink_type: SinkType,
+
+    pub http_target: String,
+    pub http_headers: String,
+
+    pub postgres_host: String,
+    pub postgres_port: String,
+    pub postgres_user: String,
+    pub postgres_password: String,
+    pub postgres_db: String,
+    pub postgres_table: String,
 }
 
 pub fn fetch() -> Result<Config, Box<dyn std::error::Error>> {

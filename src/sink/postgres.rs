@@ -1,15 +1,18 @@
-use std::error::Error;
-use async_trait::async_trait;
 use super::MessageSink;
+use async_trait::async_trait;
+use std::error::Error;
 
-pub struct PostgresSink {
-
-}
+pub struct PostgresSink {}
 
 pub struct PostgresConfig {
-
+    pub postgres_host: String,
+    pub postgres_port: String,
+    pub postgres_user: String,
+    pub postgres_password: String,
+    pub postgres_db: String,
+    pub postgres_table: String,
 }
-fn new_instance(config: PostgresConfig) -> Result<PostgresSink, &'static str> {
+pub(crate) fn new_instance(config: PostgresConfig) -> Result<Box<dyn MessageSink>, Box<dyn Error>> {
     todo!()
 }
 
