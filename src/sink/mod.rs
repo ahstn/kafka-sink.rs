@@ -1,9 +1,9 @@
 pub(crate) mod http;
-mod postgres;
+pub(crate) mod postgres;
 
+use async_trait::async_trait;
 use std::any::Any;
 use std::error::Error;
-use async_trait::async_trait;
 
 #[async_trait]
 pub trait MessageSink {

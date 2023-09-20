@@ -33,6 +33,15 @@ services:
       - 3000:3000
       - 3443:3443
 
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DATABASE: postgres
+    ports:
+      - 5432:5432
+
   # https://github.com/MaterializeInc/datagen
   datagen:
     container_name: datagen
@@ -45,7 +54,7 @@ services:
     volumes:
       - ./redpanda-datagen.json:/schemas/schema.json
     entrypoint:
-      datagen -s /schemas/schema.json -f json -n 850 -d
+      datagen -s /schemas/schema.json -f json -n 320 -d
 
   console:
     container_name: redpanda-console
