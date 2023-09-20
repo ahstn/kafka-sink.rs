@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use futures_util::task::Spawn;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::Client;
 use std::error::Error;
@@ -7,6 +6,7 @@ use std::str::FromStr;
 
 use super::MessageSink;
 
+#[derive(Clone)]
 pub struct HttpSink {
     client: Client,
     http_target: String,
