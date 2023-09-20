@@ -1,4 +1,4 @@
-use log::error;
+use log::{error, warn};
 use rdkafka::consumer::stream_consumer::StreamConsumer;
 use rdkafka::consumer::Consumer;
 use rdkafka::error::KafkaError;
@@ -7,22 +7,27 @@ use rdkafka::metadata::MetadataTopic;
 use std::error::Error;
 use std::time::Duration;
 
-pub fn decode_kafka_message(
-    msg_result: Result<BorrowedMessage, KafkaError>,
-) -> Result<String, Box<dyn Error>> {
+/**
+ * Helper function to reduce the boilerplate in decoding a kafka message.
+ * We don't want to panic if we can't decode a message, so we return an empty string instead.
+ */
+pub fn decode_message(msg_result: Result<BorrowedMessage, KafkaError>) -> String {
     match msg_result {
         Ok(borrowed_msg) => {
             let payload = match borrowed_msg.payload_view::<str>() {
                 None => "",
                 Some(Ok(s)) => s,
                 Some(Err(e)) => {
-                    error!("Error while deserializing message payload: {:?}", e);
-                    return Err(e.into());
+                    warn!("Error while deserializing message payload: {:?}", e);
+                    ""
                 }
             };
-            Ok(String::from(payload))
+            String::from(payload)
         }
-        Err(err) => Err(err.into()),
+        Err(err) => {
+            warn!("Error while receiving from Kafka: {:?}", err);
+            String::from("")
+        }
     }
 }
 

@@ -4,7 +4,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::Deserialize;
 use std::str::FromStr;
 
-#[derive(Clone, Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug, PartialEq)]
 pub enum SinkType {
     HTTP,
     Postgres,
